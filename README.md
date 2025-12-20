@@ -1,4 +1,4 @@
-# MyIP's Idle Crab
+# Idle Crab
 
 A RuneLite plugin that tracks sand crab aggro time and aggressively alerts you when you go out of combat.
 
