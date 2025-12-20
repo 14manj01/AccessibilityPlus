@@ -36,7 +36,7 @@ public class SandCrabCombatNotifierOverlay extends Overlay
         }
 
         panel.getChildren().add(LineComponent.builder()
-                .left("MyIP's Idle Crab")
+                .left("Idle Crab")
                 .build());
 
         int totalTicks = plugin.getAggroTotalTicks();
