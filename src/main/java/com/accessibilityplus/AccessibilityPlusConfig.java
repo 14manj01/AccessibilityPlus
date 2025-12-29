@@ -122,7 +122,7 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "enableTts",
             name = "Enable TTS",
-            description = "Enable text-to-speech for dialog and option menus. This feature sends text to an external speech service to generate audio.",
+            description = "Enable text-to-speech for dialog and option menus. When enabled, dialog text is sent to a fixed external speech service to generate WAV audio.",
             section = speechSection,
             position = 0
     )
@@ -131,16 +131,24 @@ public interface AccessibilityPlusConfig extends Config
         return false;
     }
 
+    /**
+     * This exists to satisfy your current code path:
+     * AccessibilityPlusPlugin listens for ConfigChanged with key "testTts"
+     * and then checks config.testTts().
+     *
+     * This is implemented as a toggle to restore compilation.
+     * If you want a real "button", we can convert your plugin code to use ConfigButtonPressed.
+     */
     @ConfigItem(
-            keyName = "cloudTtsBaseUrl",
-            name = "Speech service URL",
-            description = "Base URL for the speech service. The service should accept query params m (text), r (rate), v (voice) and return WAV audio bytes.",
+            keyName = "testTts",
+            name = "Test TTS",
+            description = "Toggle on to test TTS. If your plugin speaks, toggle back off.",
             section = speechSection,
             position = 1
     )
-    default String cloudTtsBaseUrl()
+    default boolean testTts()
     {
-        return "https://ttsplugin.com";
+        return false;
     }
 
     @Range(min = 0, max = 10)
@@ -160,7 +168,7 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "cloudTtsVoice",
             name = "Voice",
-            description = "Voice parameter sent to the service. Values depend on the service implementation.",
+            description = "Voice parameter sent to the service.",
             section = speechSection,
             position = 3
     )
@@ -218,19 +226,7 @@ public interface AccessibilityPlusConfig extends Config
         return 700;
     }
 
-    @ConfigItem(
-            keyName = "testTts",
-            name = "Test TTS",
-            description = "Toggle to speak a test phrase.",
-            section = speechSection,
-            position = 20
-    )
-    default boolean testTts()
-    {
-        return false;
-    }
-
-// --------------------
+    // --------------------
     // Minimap
     // --------------------
 
@@ -246,26 +242,13 @@ public interface AccessibilityPlusConfig extends Config
         return true;
     }
 
-    @Range(min = 40, max = 255)
-    @ConfigItem(
-            keyName = "minimapShapeOpacity",
-            name = "Minimap shape opacity",
-            description = "Opacity for minimap shapes.",
-            section = minimapSection,
-            position = 1
-    )
-    default int minimapShapeOpacity()
-    {
-        return 220;
-    }
-
-    @Range(min = 1, max = 10)
+    @Range(min = 2, max = 20)
     @ConfigItem(
             keyName = "minimapShapeSize",
-            name = "Minimap shape size",
+            name = "Shape size",
             description = "Size of minimap shapes.",
             section = minimapSection,
-            position = 2
+            position = 1
     )
     default int minimapShapeSize()
     {
@@ -273,23 +256,11 @@ public interface AccessibilityPlusConfig extends Config
     }
 
     @ConfigItem(
-            keyName = "showNpcsOnMinimapShapes",
-            name = "Show NPCs",
-            description = "Show shapes for NPCs.",
-            section = minimapSection,
-            position = 3
-    )
-    default boolean showNpcsOnMinimapShapes()
-    {
-        return true;
-    }
-
-    @ConfigItem(
             keyName = "showLocalPlayerOnMinimapShapes",
             name = "Show local player",
-            description = "Show a shape for the local player.",
+            description = "Draw a shape for your player on the minimap.",
             section = minimapSection,
-            position = 4
+            position = 2
     )
     default boolean showLocalPlayerOnMinimapShapes()
     {
@@ -299,12 +270,37 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "showPlayersOnMinimapShapes",
             name = "Show other players",
-            description = "Show shapes for other players.",
+            description = "Draw shapes for other players on the minimap.",
             section = minimapSection,
-            position = 5
+            position = 3
     )
     default boolean showPlayersOnMinimapShapes()
     {
-        return false;
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showNpcsOnMinimapShapes",
+            name = "Show NPCs",
+            description = "Draw shapes for NPCs on the minimap.",
+            section = minimapSection,
+            position = 4
+    )
+    default boolean showNpcsOnMinimapShapes()
+    {
+        return true;
+    }
+
+    @Range(min = 40, max = 255)
+    @ConfigItem(
+            keyName = "minimapShapeOpacity",
+            name = "Opacity",
+            description = "Opacity for minimap shapes.",
+            section = minimapSection,
+            position = 5
+    )
+    default int minimapShapeOpacity()
+    {
+        return 220;
     }
 }

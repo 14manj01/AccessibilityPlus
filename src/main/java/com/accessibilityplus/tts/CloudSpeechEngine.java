@@ -1,16 +1,13 @@
 package com.accessibilityplus.tts;
 
 import com.accessibilityplus.AccessibilityPlusConfig;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.Call;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -19,6 +16,13 @@ import okhttp3.Response;
 @Singleton
 public class CloudSpeechEngine implements SpeechEngine
 {
+    /**
+     * Hardcode the only allowed endpoint for Plugin Hub compliance.
+     * If you need to change it later, ship an update rather than allowing arbitrary URLs.
+     */
+    private static final String TTS_HOST = "ttsplugin.com";
+    private static final String TTS_SCHEME = "https";
+
     private final OkHttpClient http;
     private final AccessibilityPlusConfig config;
     private final ScheduledExecutorService executor;
@@ -43,13 +47,7 @@ public class CloudSpeechEngine implements SpeechEngine
     @Override
     public boolean isAvailable()
     {
-        if (!config.enableTts())
-        {
-            return false;
-        }
-
-        String base = config.cloudTtsBaseUrl();
-        return base != null && !base.trim().isEmpty();
+        return config.enableTts();
     }
 
     @Override
@@ -77,12 +75,15 @@ public class CloudSpeechEngine implements SpeechEngine
         {
             try
             {
-                String base = config.cloudTtsBaseUrl().trim();
-
-                String url = base
-                        + "?m=" + URLEncoder.encode(text, StandardCharsets.UTF_8.name())
-                        + "&r=" + config.cloudTtsRate()
-                        + "&v=" + config.cloudTtsVoice();
+                HttpUrl url = new HttpUrl.Builder()
+                        .scheme(TTS_SCHEME)
+                        .host(TTS_HOST)
+                        // If your service expects a path, set it here:
+                        // .addPathSegment("tts")
+                        .addQueryParameter("m", text)
+                        .addQueryParameter("r", String.valueOf(config.cloudTtsRate()))
+                        .addQueryParameter("v", String.valueOf(config.cloudTtsVoice()))
+                        .build();
 
                 Request req = new Request.Builder()
                         .url(url)
@@ -106,15 +107,7 @@ public class CloudSpeechEngine implements SpeechEngine
                         return;
                     }
 
-                    File tmp = File.createTempFile("ap_tts_", ".wav");
-                    tmp.deleteOnExit();
-
-                    try (FileOutputStream fos = new FileOutputStream(tmp))
-                    {
-                        fos.write(wav);
-                    }
-
-                    wavPlayer.playIfCurrent(tmp, gen);
+                    wavPlayer.playBytesIfCurrent(wav, gen);
                 }
             }
             catch (IOException e)
