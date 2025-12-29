@@ -1,50 +1,61 @@
 package com.accessibilityplus.tts;
 
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Bridge mode: POST text to a locally running speech service (outside RuneLite).
- *
- * This implementation does NOT download audio or play WAVs. It simply sends
- * speech requests and expects the bridge to handle synthesis and playback.
- *
- * This matches the Natural Speech architecture and avoids shipping native
- * binaries or invoking external processes from inside RuneLite.
- */
 public final class BridgeSpeechEngine implements SpeechEngine
 {
+    private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+
     private final URI endpoint;
-    private final Duration timeout;
-    private final HttpClient http;
+    private final OkHttpClient http;
     private final ExecutorService executor;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
-    public BridgeSpeechEngine(String url, int timeoutMs)
+    /**
+     * Create a bridge speech engine that POSTs JSON to the configured endpoint.
+     *
+     * @param okHttp RuneLite-injected OkHttpClient
+     * @param url Full URL to POST to (example: http://127.0.0.1:59125/speak)
+     * @param timeoutMs request timeout in ms (min 100ms)
+     */
+    public BridgeSpeechEngine(OkHttpClient okHttp, String url, int timeoutMs)
     {
-        this.endpoint = URI.create(Objects.requireNonNull(url, "url").trim());
-        this.timeout = Duration.ofMillis(Math.max(100, timeoutMs));
-        this.http = HttpClient.newBuilder()
-            .connectTimeout(this.timeout)
-            .build();
-        this.executor = Executors.newSingleThreadExecutor(r -> {
+        Objects.requireNonNull(okHttp, "okHttp");
+        Objects.requireNonNull(url, "url");
+
+        long ms = Math.max(100, timeoutMs);
+
+        // RuneLite supplies the base OkHttpClient. Clone it with a call timeout.
+        this.http = okHttp.newBuilder()
+                .callTimeout(Duration.ofMillis(ms))
+                .build();
+
+        this.endpoint = URI.create(url.trim());
+
+        ThreadFactory tf = r ->
+        {
             Thread t = new Thread(r, "ap-tts-bridge");
             t.setDaemon(true);
             return t;
-        });
+        };
+        this.executor = Executors.newSingleThreadExecutor(tf);
     }
 
     @Override
     public boolean isAvailable()
     {
-        // We don't health-check here to keep it cheap; controller can probe if desired.
         return !closed.get();
     }
 
@@ -57,36 +68,13 @@ public final class BridgeSpeechEngine implements SpeechEngine
         }
 
         final String payload = toJsonPayload(text);
-
-        executor.execute(() -> {
-            if (closed.get())
-            {
-                return;
-            }
-
-            try
-            {
-                HttpRequest req = HttpRequest.newBuilder(endpoint)
-                    .timeout(timeout)
-                    .header("Content-Type", "application/json; charset=utf-8")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload))
-                    .build();
-
-                // We only care that the request was accepted.
-                http.send(req, HttpResponse.BodyHandlers.discarding());
-            }
-            catch (Exception ignored)
-            {
-                // Fail silently: bridge may be down, user may not want speech, etc.
-            }
-        });
+        executor.execute(() -> doSpeak(payload));
     }
 
     @Override
     public void stop()
     {
-        // Bridge is responsible for stopping speech, if it supports it.
-        // We intentionally no-op here to avoid requiring a control endpoint.
+        // Fire-and-forget bridge: no stop semantics.
     }
 
     @Override
@@ -99,10 +87,35 @@ public final class BridgeSpeechEngine implements SpeechEngine
         executor.shutdownNow();
     }
 
+    private void doSpeak(String payload)
+    {
+        if (closed.get())
+        {
+            return;
+        }
+
+        // IMPORTANT: OkHttp (RuneLite) uses create(MediaType, String) signature
+        RequestBody body = RequestBody.create(JSON, payload);
+
+        Request req = new Request.Builder()
+                .url(endpoint.toString())
+                .post(body)
+                .build();
+
+        try (Response resp = http.newCall(req).execute())
+        {
+            // Intentionally ignore response body.
+        }
+        catch (Exception ignored)
+        {
+            // Never crash the client on TTS failures.
+        }
+    }
+
     private static String toJsonPayload(String text)
     {
-        String safe = (text == null) ? "" : text.trim();
-        return "{\"text\":\"" + escapeJson(safe) + "\"}";
+        String s = (text == null) ? "" : text.trim();
+        return "{\"text\":\"" + escapeJson(s) + "\"}";
     }
 
     private static String escapeJson(String s)
@@ -129,7 +142,7 @@ public final class BridgeSpeechEngine implements SpeechEngine
                     sb.append("\\t");
                     break;
                 default:
-                    if (c < 0x20)
+                    if (c < 32)
                     {
                         sb.append(String.format("\\u%04x", (int) c));
                     }

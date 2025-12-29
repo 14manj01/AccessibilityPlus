@@ -184,7 +184,7 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "piperPath",
             name = "Piper executable path",
-            description = "Full path to piper.exe (Windows) or piper binary (Mac/Linux). Example: C:\\piper\\piper.exe",
+            description = "Full path to piper.exe (Windows) or piper binary (Mac/Linux). Could be: C:\\piper\\piper.exe",
             section = speechSection,
             position = 4
     )
