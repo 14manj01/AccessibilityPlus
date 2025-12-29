@@ -65,7 +65,8 @@ public class AccessibilityPlusPlugin extends Plugin
     @Inject
     private TtsController ttsController;
 
-    private final EmbeddedBridgeServer embeddedBridge = new EmbeddedBridgeServer();
+    @Inject
+    private EmbeddedBridgeServer embeddedBridge;
     private volatile int embeddedPort = -1;
 
     @Getter

@@ -1,132 +1,73 @@
 package com.accessibilityplus.tts;
 
-import javax.sound.sampled.AudioInputStream;
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.Clip;
-import javax.sound.sampled.LineEvent;
-import javax.sound.sampled.LineListener;
 import java.io.File;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
+import javax.inject.Inject;
+import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.audio.AudioPlayer;
 
 @Slf4j
-public final class WavPlayer
+@Singleton
+public class WavPlayer
 {
-    private static final AtomicReference<Clip> CURRENT = new AtomicReference<>();
+    private final AudioPlayer audioPlayer;
 
-    private WavPlayer()
+    /**
+     * Used to invalidate in-flight work when we "stop".
+     * AudioPlayer does not expose a hard stop API, so we prevent new playbacks
+     * that belong to an older generation.
+     */
+    private final AtomicLong generation = new AtomicLong(0);
+
+    @Inject
+    public WavPlayer(AudioPlayer audioPlayer)
     {
+        this.audioPlayer = audioPlayer;
     }
 
     /**
-     * Stop any currently playing audio immediately.
+     * Cancels any queued or about-to-play audio.
+     * This cannot forcibly stop a clip already playing via AudioPlayer,
+     * but it prevents stale generations from starting.
      */
-    public static void stop()
+    public void stopNow()
     {
-        Clip c = CURRENT.getAndSet(null);
-        if (c != null)
-        {
-            try
-            {
-                c.stop();
-            }
-            catch (Exception ignored)
-            {
-            }
-            try
-            {
-                c.close();
-            }
-            catch (Exception ignored)
-            {
-            }
-        }
+        generation.incrementAndGet();
     }
 
     /**
-     * Play the WAV file and block until playback completes.
+     * Plays the wav file only if the generation hasn't changed.
+     * Gain uses AudioPlayer's float parameter, where 0.0f is typically "no change".
      */
-    public static void playBlocking(File wavFile)
+    public void playIfCurrent(File wavFile, long expectedGeneration)
     {
         if (wavFile == null || !wavFile.isFile())
         {
             return;
         }
 
-        // Stop any existing audio before starting new playback.
-        stop();
-
-        AudioInputStream stream = null;
-        Clip clip = null;
-        CountDownLatch done = new CountDownLatch(1);
+        if (generation.get() != expectedGeneration)
+        {
+            return;
+        }
 
         try
         {
-            stream = AudioSystem.getAudioInputStream(wavFile);
-            clip = AudioSystem.getClip();
-            clip.open(stream);
-
-            Clip finalClip = clip;
-            clip.addLineListener(new LineListener()
-            {
-                @Override
-                public void update(LineEvent event)
-                {
-                    LineEvent.Type type = event.getType();
-                    if (type == LineEvent.Type.STOP || type == LineEvent.Type.CLOSE)
-                    {
-                        done.countDown();
-                        try
-                        {
-                            finalClip.removeLineListener(this);
-                        }
-                        catch (Exception ignored)
-                        {
-                        }
-                    }
-                }
-            });
-
-            CURRENT.set(clip);
-            clip.start();
-            done.await();
+            // 0.0f is "no gain adjustment" for most AudioPlayer implementations.
+            audioPlayer.play(wavFile, 0.0f);
         }
         catch (Exception e)
         {
-            log.debug("Wav playback failed: {}", e.toString());
+            log.debug("Audio playback failed: {}", e.toString());
         }
-        finally
-        {
-            // Ensure CURRENT is cleared if we're the active clip.
-            Clip cur = CURRENT.get();
-            if (cur == clip)
-            {
-                CURRENT.compareAndSet(cur, null);
-            }
+    }
 
-            try
-            {
-                if (clip != null)
-                {
-                    clip.stop();
-                    clip.close();
-                }
-            }
-            catch (Exception ignored)
-            {
-            }
-
-            try
-            {
-                if (stream != null)
-                {
-                    stream.close();
-                }
-            }
-            catch (Exception ignored)
-            {
-            }
-        }
+    /**
+     * Snapshot the current generation so callers can guard playback.
+     */
+    public long currentGeneration()
+    {
+        return generation.get();
     }
 }

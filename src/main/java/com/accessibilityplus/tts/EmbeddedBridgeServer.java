@@ -4,7 +4,6 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -14,152 +13,123 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import lombok.extern.slf4j.Slf4j;
 
-/**
- * Embedded local HTTP bridge (similar to Natural Speech):
- * - GET  /health
- * - POST /speak  {"text":"..."}
- *
- * This server is intended to be started from inside the RuneLite plugin JVM.
- * It runs Piper as a subprocess and plays generated WAV audio via Java Sound.
- */
-public final class EmbeddedBridgeServer
+@Slf4j
+@Singleton
+public class EmbeddedBridgeServer
 {
+    private final WavPlayer wavPlayer;
+
+    private volatile HttpServer server;
+    private volatile ExecutorService executor;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    private HttpServer server;
-    private ExecutorService httpExecutor;
-    private ExecutorService speechExecutor;
-    private final AtomicLong speechGeneration = new AtomicLong(0L);
+    // Piper config (set on start)
+    private volatile String piperExePath = "";
+    private volatile String voiceModelPath = "";
 
-    private volatile String piperPath = "";
-    private volatile String modelPath = "";
+    // Used to kill pending / queued speech when leaving chat
+    private volatile long speechGeneration = 0;
+
+    @Inject
+    public EmbeddedBridgeServer(WavPlayer wavPlayer)
+    {
+        this.wavPlayer = wavPlayer;
+    }
 
     public boolean isRunning()
     {
         return running.get();
     }
 
-    public int getPort()
+    public void start(int port, String piperPath, String modelPath) throws IOException
     {
-        HttpServer s = server;
-        if (s == null)
+        if (isRunning())
         {
-            return -1;
+            stop();
         }
-        return s.getAddress().getPort();
-    }
 
-    public synchronized void start(int port, String piperPath, String modelPath) throws IOException
-    {
-        this.piperPath = safe(piperPath);
-        this.modelPath = safe(modelPath);
-
-        if (running.get())
-        {
-            return;
-        }
+        piperExePath = safe(piperPath);
+        voiceModelPath = safe(modelPath);
 
         InetSocketAddress addr = new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port);
-        server = HttpServer.create(addr, 0);
+        HttpServer s = HttpServer.create(addr, 0);
 
-        httpExecutor = Executors.newFixedThreadPool(2, r ->
+        s.createContext("/health", new HealthHandler());
+        s.createContext("/speak", new SpeakHandler());
+
+        ExecutorService ex = Executors.newCachedThreadPool(r ->
         {
-            Thread t = new Thread(r, "accessibility-plus-bridge-http");
+            Thread t = new Thread(r, "accessibility-plus-bridge");
             t.setDaemon(true);
             return t;
         });
 
-        speechExecutor = Executors.newSingleThreadExecutor(r ->
-        {
-            Thread t = new Thread(r, "accessibility-plus-bridge-speech");
-            t.setDaemon(true);
-            return t;
-        });
+        s.setExecutor(ex);
+        s.start();
 
-        server.createContext("/health", new HealthHandler());
-        server.createContext("/speak", new SpeakHandler());
-
-        server.setExecutor(httpExecutor);
-        server.start();
+        server = s;
+        executor = ex;
         running.set(true);
+
+        log.info("Embedded bridge started on 127.0.0.1:{}", port);
     }
 
-    public synchronized void stop()
+    public void stop()
     {
         running.set(false);
 
-        if (server != null)
+        try
         {
-            try
+            if (server != null)
             {
                 server.stop(0);
             }
-            catch (Exception ignored)
-            {
-            }
-            server = null;
+        }
+        catch (Exception ignored)
+        {
         }
 
-        if (httpExecutor != null)
+        try
         {
-            try
+            if (executor != null)
             {
-                httpExecutor.shutdownNow();
+                executor.shutdownNow();
             }
-            catch (Exception ignored)
-            {
-            }
-            httpExecutor = null;
+        }
+        catch (Exception ignored)
+        {
         }
 
-        if (speechExecutor != null)
-        {
-            try
-            {
-                speechExecutor.shutdownNow();
-            }
-            catch (Exception ignored)
-            {
-            }
-            speechExecutor = null;
-        }
+        server = null;
+        executor = null;
+
+        // Invalidate any pending speech
+        stopSpeechNow();
+
+        log.info("Embedded bridge stopped");
     }
 
     /**
-     * Stop any current/queued speech without shutting down the HTTP server.
-     * Used when the dialog UI closes so speech does not continue after leaving chat.
+     * Best-effort cancel: prevents new WAV playback for stale requests.
+     * AudioPlayer does not expose an allowed hard-stop, so we invalidate work.
      */
-    public synchronized void stopSpeechNow()
+    public void stopSpeechNow()
     {
-        // Bump generation so in-flight tasks can self-cancel before playback.
-        speechGeneration.incrementAndGet();
-
-        // Stop any currently playing audio immediately.
-        WavPlayer.stop();
-
-        // Drop any queued speech tasks by recreating the executor.
-        ExecutorService old = speechExecutor;
-        if (old != null)
+        speechGeneration++;
+        try
         {
-            try
-            {
-                old.shutdownNow();
-            }
-            catch (Exception ignored)
-            {
-            }
+            wavPlayer.stopNow();
         }
-
-        speechExecutor = Executors.newSingleThreadExecutor(r ->
+        catch (Exception ignored)
         {
-            Thread t = new Thread(r, "accessibility-plus-bridge-speech");
-            t.setDaemon(true);
-            return t;
-        });
+        }
     }
 
     private final class HealthHandler implements HttpHandler
@@ -167,16 +137,13 @@ public final class EmbeddedBridgeServer
         @Override
         public void handle(HttpExchange ex) throws IOException
         {
-            if (!"GET".equalsIgnoreCase(ex.getRequestMethod()))
+            byte[] out = "ok".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            ex.sendResponseHeaders(200, out.length);
+            try (OutputStream os = ex.getResponseBody())
             {
-                writeJson(ex, 405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
-                return;
+                os.write(out);
             }
-
-            boolean ready = new File(piperPath).isFile() && new File(modelPath).isFile();
-            String body = "{\"ok\":true,\"running\":" + (running.get() ? "true" : "false") +
-                    ",\"ready\":" + (ready ? "true" : "false") + "}";
-            writeJson(ex, 200, body);
         }
     }
 
@@ -187,97 +154,199 @@ public final class EmbeddedBridgeServer
         {
             if (!"POST".equalsIgnoreCase(ex.getRequestMethod()))
             {
-                writeJson(ex, 405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
+                ex.sendResponseHeaders(405, -1);
                 return;
             }
 
-            if (!running.get())
+            long myGen = speechGeneration;
+
+            String body = readAll(ex.getRequestBody());
+            String text = extractTextFromJson(body);
+
+            if (text.isEmpty())
             {
-                writeJson(ex, 503, "{\"ok\":false,\"error\":\"not_running\"}");
+                ex.sendResponseHeaders(400, -1);
                 return;
             }
 
-            final String body = readAll(ex.getRequestBody());
-            final String text = SimpleJson.extractString(body, "text");
+            // Immediately ACK so the client doesn't block on piper runtime
+            ex.sendResponseHeaders(204, -1);
+            ex.close();
 
-            if (text == null || text.trim().isEmpty())
+            // Do work async
+            ExecutorService exr = executor;
+            if (exr == null)
             {
-                writeJson(ex, 400, "{\"ok\":false,\"error\":\"missing_text\"}");
                 return;
             }
 
-            final File piperExe = new File(piperPath);
-            final File model = new File(modelPath);
-
-            if (!piperExe.isFile() || !model.isFile())
+            exr.submit(() ->
             {
-                writeJson(ex, 400, "{\"ok\":false,\"error\":\"piper_or_model_missing\"}");
-                return;
-            }
+                if (!running.get())
+                {
+                    return;
+                }
 
-            ExecutorService speech = speechExecutor;
-            if (speech == null)
-            {
-                writeJson(ex, 503, "{\"ok\":false,\"error\":\"speech_executor_down\"}");
-                return;
-            }
+                // Cancelled before we started
+                if (myGen != speechGeneration)
+                {
+                    return;
+                }
 
-            final long gen = speechGeneration.get();
-
-            speech.submit(() ->
-            {
+                File wav = null;
                 try
                 {
-                    if (gen != speechGeneration.get())
+                    wav = PiperRunner.runToWav(piperExePath, voiceModelPath, text);
+
+                    // Cancelled while piper was running
+                    if (myGen != speechGeneration)
                     {
                         return;
                     }
 
-                    File wav = PiperRunner.synthesizeToTempWav(piperExe, model, text);
-                    if (gen != speechGeneration.get())
+                    // Play only if still current
+                    wavPlayer.playIfCurrent(wav, wavPlayer.currentGeneration());
+                }
+                catch (Exception e)
+                {
+                    log.debug("Speak failed: {}", e.toString());
+                }
+                finally
+                {
+                    if (wav != null)
                     {
                         try
                         {
-                            wav.delete();
+                            // best-effort cleanup
+                            if (wav.exists())
+                            {
+                                //noinspection ResultOfMethodCallIgnored
+                                wav.delete();
+                            }
                         }
                         catch (Exception ignored)
                         {
                         }
-                        return;
                     }
-                    WavPlayer.playBlocking(wav);
-                    try
-                    {
-                        // best-effort cleanup
-                        wav.delete();
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
-                }
-                catch (Exception ignored)
-                {
                 }
             });
-
-            writeJson(ex, 200, "{\"ok\":true}");
         }
     }
 
-    private static void writeJson(HttpExchange ex, int code, String body) throws IOException
+    private static String extractTextFromJson(String body)
     {
-        Headers headers = ex.getResponseHeaders();
-        headers.set("Content-Type", "application/json; charset=utf-8");
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        ex.sendResponseHeaders(code, bytes.length);
-        try (OutputStream os = ex.getResponseBody())
+        // Minimal JSON extraction: {"text":"..."}
+        // We avoid adding JSON libs for Plugin Hub.
+        if (body == null)
         {
-            os.write(bytes);
+            return "";
         }
+
+        String b = body.trim();
+        int idx = b.indexOf("\"text\"");
+        if (idx < 0)
+        {
+            return "";
+        }
+
+        int colon = b.indexOf(':', idx);
+        if (colon < 0)
+        {
+            return "";
+        }
+
+        int firstQuote = b.indexOf('"', colon + 1);
+        if (firstQuote < 0)
+        {
+            return "";
+        }
+
+        int secondQuote = findStringEndQuote(b, firstQuote + 1);
+        if (secondQuote < 0)
+        {
+            return "";
+        }
+
+        String raw = b.substring(firstQuote + 1, secondQuote);
+        return unescapeJsonString(raw).trim();
+    }
+
+    private static int findStringEndQuote(String s, int start)
+    {
+        boolean escaped = false;
+        for (int i = start; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String unescapeJsonString(String s)
+    {
+        if (s == null || s.isEmpty())
+        {
+            return "";
+        }
+
+        StringBuilder out = new StringBuilder(s.length());
+        boolean esc = false;
+
+        for (int i = 0; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+            if (!esc)
+            {
+                if (c == '\\')
+                {
+                    esc = true;
+                }
+                else
+                {
+                    out.append(c);
+                }
+                continue;
+            }
+
+            esc = false;
+            switch (c)
+            {
+                case '"': out.append('"'); break;
+                case '\\': out.append('\\'); break;
+                case '/': out.append('/'); break;
+                case 'b': out.append('\b'); break;
+                case 'f': out.append('\f'); break;
+                case 'n': out.append('\n'); break;
+                case 'r': out.append('\r'); break;
+                case 't': out.append('\t'); break;
+                default:
+                    out.append(c);
+            }
+        }
+
+        return out.toString();
     }
 
     private static String readAll(InputStream in) throws IOException
     {
+        if (in == null)
+        {
+            return "";
+        }
+
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buf = new byte[4096];
         int r;
