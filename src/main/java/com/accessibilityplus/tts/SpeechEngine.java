@@ -5,7 +5,7 @@ package com.accessibilityplus.tts;
  *
  * Contract:
  * - speak() must return quickly (do work off-thread).
- * - implementers should internally serialize speech requests.
+ * - stopNow() should best-effort stop current and cancel queued work.
  */
 public interface SpeechEngine
 {
@@ -13,7 +13,7 @@ public interface SpeechEngine
 
     void speak(String text);
 
-    void stop();
+    void stopNow();
 
     void shutdown();
 }

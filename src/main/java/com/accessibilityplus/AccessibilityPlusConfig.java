@@ -36,19 +36,6 @@ public interface AccessibilityPlusConfig extends Config
         BLACK_PANEL
     }
 
-    enum SpeechBackend
-    {
-        /**
-         * Uses a local HTTP bridge (recommended). Accessibility Plus can auto-start an embedded bridge.
-         */
-        BRIDGE,
-
-        /**
-         * Uses a pure-Java TTS engine (simpler setup, lower quality).
-         */
-        FREETTS
-    }
-
     // --------------------
     // Dialog
     // --------------------
@@ -135,7 +122,7 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "enableTts",
             name = "Enable TTS",
-            description = "Speak dialog and option menus using text-to-speech.",
+            description = "Enable text-to-speech for dialog and option menus. This feature sends text to an external speech service to generate audio.",
             section = speechSection,
             position = 0
     )
@@ -145,89 +132,41 @@ public interface AccessibilityPlusConfig extends Config
     }
 
     @ConfigItem(
-            keyName = "ttsBackend",
-            name = "TTS backend",
-            description = "Select the text-to-speech engine.",
+            keyName = "cloudTtsBaseUrl",
+            name = "Speech service URL",
+            description = "Base URL for the speech service. The service should accept query params m (text), r (rate), v (voice) and return WAV audio bytes.",
             section = speechSection,
             position = 1
     )
-    default SpeechBackend ttsBackend()
+    default String cloudTtsBaseUrl()
     {
-        return SpeechBackend.BRIDGE;
+        return "https://ttsplugin.com";
     }
 
+    @Range(min = 0, max = 10)
     @ConfigItem(
-            keyName = "startEmbeddedBridge",
-            name = "Start bridge when TTS enabled",
-            description = "When enabled, Accessibility Plus starts an embedded local bridge (HTTP) that runs Piper.",
+            keyName = "cloudTtsRate",
+            name = "Speech rate",
+            description = "Speech rate parameter sent to the service.",
             section = speechSection,
             position = 2
     )
-    default boolean startEmbeddedBridge()
+    default int cloudTtsRate()
     {
-        return true;
+        return 1;
     }
 
-    @Range(min = 1024, max = 65535)
+    @Range(min = 0, max = 50)
     @ConfigItem(
-            keyName = "embeddedBridgePort",
-            name = "Bridge port",
-            description = "Port for the embedded bridge. Default matches Natural Speech (59125).",
+            keyName = "cloudTtsVoice",
+            name = "Voice",
+            description = "Voice parameter sent to the service. Values depend on the service implementation.",
             section = speechSection,
             position = 3
     )
-    default int embeddedBridgePort()
+    default int cloudTtsVoice()
     {
-        return 59125;
-    }
-
-    @ConfigItem(
-            keyName = "piperPath",
-            name = "Piper executable path",
-            description = "Full path to piper.exe (Windows) or piper binary (Mac/Linux). Could be: C:\\piper\\piper.exe",
-            section = speechSection,
-            position = 4
-    )
-    default String piperPath()
-    {
-        return "";
-    }
-
-    @ConfigItem(
-            keyName = "piperModelPath",
-            name = "Piper voice model (.onnx)",
-            description = "Full path to a Piper voice model (.onnx). The matching .onnx.json should be alongside it.",
-            section = speechSection,
-            position = 5
-    )
-    default String piperModelPath()
-    {
-        return "";
-    }
-
-    @ConfigItem(
-            keyName = "bridgeBaseUrl",
-            name = "Bridge base URL",
-            description = "If you use an external bridge, set its base URL here. If embedded bridge is running, this is ignored.",
-            section = speechSection,
-            position = 6
-    )
-    default String bridgeBaseUrl()
-    {
-        return "http://127.0.0.1:59125";
-    }
-
-    @Range(min = 250, max = 10000)
-    @ConfigItem(
-            keyName = "ttsBridgeTimeoutMs",
-            name = "Bridge timeout (ms)",
-            description = "Timeout for bridge requests.",
-            section = speechSection,
-            position = 7
-    )
-    default int ttsBridgeTimeoutMs()
-    {
-        return 2500;
+        return 0;
     }
 
     @ConfigItem(
@@ -245,7 +184,7 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "ttsIncludeSpeaker",
             name = "Include speaker name",
-            description = "Prefix speech with the NPC name when available.",
+            description = "Include the speaker name before dialog lines.",
             section = speechSection,
             position = 11
     )
@@ -256,8 +195,8 @@ public interface AccessibilityPlusConfig extends Config
 
     @ConfigItem(
             keyName = "ttsSpeakOptions",
-            name = "Speak option menus",
-            description = "Speak the numbered option list when Select an option appears.",
+            name = "Speak dialog options",
+            description = "Speak option menus when they appear.",
             section = speechSection,
             position = 12
     )
@@ -270,40 +209,28 @@ public interface AccessibilityPlusConfig extends Config
     @ConfigItem(
             keyName = "ttsCooldownMs",
             name = "Cooldown (ms)",
-            description = "Minimum time between spoken events to prevent spam from widget flicker.",
+            description = "Minimum milliseconds between spoken phrases.",
             section = speechSection,
-            position = 15
+            position = 13
     )
     default int ttsCooldownMs()
     {
-        return 600;
-    }
-
-    @ConfigItem(
-            keyName = "checkBridge",
-            name = "Check bridge",
-            description = "Toggle to check whether the speech bridge is running.",
-            section = speechSection,
-            position = 17
-    )
-    default boolean checkBridge()
-    {
-        return false;
+        return 700;
     }
 
     @ConfigItem(
             keyName = "testTts",
             name = "Test TTS",
-            description = "Toggle to send a test phrase to the speech bridge.",
+            description = "Toggle to speak a test phrase.",
             section = speechSection,
-            position = 18
+            position = 20
     )
     default boolean testTts()
     {
         return false;
     }
 
-    // --------------------
+// --------------------
     // Minimap
     // --------------------
 

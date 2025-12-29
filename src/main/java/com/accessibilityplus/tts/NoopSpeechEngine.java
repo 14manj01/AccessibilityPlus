@@ -1,10 +1,9 @@
 package com.accessibilityplus.tts;
 
 /**
- * No-op SpeechEngine used when TTS is disabled or backend is unavailable.
- * Safe for Plugin Hub. Performs no work.
+ * No-op TTS backend (used when disabled or misconfigured).
  */
-public final class NoopSpeechEngine implements SpeechEngine
+public class NoopSpeechEngine implements SpeechEngine
 {
     @Override
     public boolean isAvailable()
@@ -15,18 +14,18 @@ public final class NoopSpeechEngine implements SpeechEngine
     @Override
     public void speak(String text)
     {
-        // intentionally empty
+        // no-op
     }
 
     @Override
-    public void stop()
+    public void stopNow()
     {
-        // intentionally empty
+        // no-op
     }
 
     @Override
     public void shutdown()
     {
-        // intentionally empty
+        // no-op
     }
 }

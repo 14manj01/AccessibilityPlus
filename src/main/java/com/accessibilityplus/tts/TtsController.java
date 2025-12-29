@@ -1,178 +1,105 @@
 package com.accessibilityplus.tts;
 
-import java.io.IOException;
+import com.accessibilityplus.AccessibilityPlusConfig;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.inject.Inject;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
+import javax.inject.Singleton;
+import lombok.extern.slf4j.Slf4j;
 
+/**
+ * High-level TTS coordinator:
+ * - De-dupe on dialog/options keys so we do not speak every tick.
+ * - Preempt best-effort on user advancing dialog (clicking next / selecting an option).
+ * - Delegates actual speech to SpeechEngine.
+ */
+@Slf4j
+@Singleton
 public class TtsController
 {
-    private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+    private final AccessibilityPlusConfig config;
+    private final SpeechEngineFactory engineFactory;
 
-    private volatile String bridgeBaseUrl = "http://127.0.0.1:59125";
-    private volatile long cooldownMs = 700;
+    private volatile SpeechEngine engine;
 
-    private volatile long lastSpokenAt = 0L;
-    private volatile String lastSpokenKey = "";
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
-    private final OkHttpClient http;
+    private String lastSpokenDialogKey = "";
+    private String lastSpokenOptionsKey = "";
+    private long lastSpokenAt = 0L;
 
-    private volatile ExecutorService worker;
-
-    private volatile boolean bridgeUp = false;
-    private volatile long lastHealthCheckAt = 0L;
-    private volatile String lastBridgeError = "";
+    // When the user clicks through, suppress speaking stale option lists for a short window.
+    private volatile long suppressUntil = 0L;
 
     @Inject
-    public TtsController(OkHttpClient http)
+    public TtsController(AccessibilityPlusConfig config, SpeechEngineFactory engineFactory)
     {
-        this.http = http;
+        this.config = config;
+        this.engineFactory = engineFactory;
     }
 
-    public void setBridgeBaseUrl(String url)
+    public synchronized void refreshEngine()
     {
-        if (url == null || url.trim().isEmpty())
+        shutdownEngineOnly();
+
+        if (!config.enableTts())
         {
+            engine = null;
+            started.set(false);
             return;
         }
 
-        String u = url.trim();
-
-        // Strip trailing /speak or /health if user pasted an endpoint URL
-        if (u.endsWith("/speak"))
-        {
-            u = u.substring(0, u.length() - "/speak".length());
-        }
-        if (u.endsWith("/health"))
-        {
-            u = u.substring(0, u.length() - "/health".length());
-        }
-
-        // Strip trailing slash
-        while (u.endsWith("/"))
-        {
-            u = u.substring(0, u.length() - 1);
-        }
-
-        bridgeBaseUrl = u;
+        engine = engineFactory.create();
+        started.set(true);
     }
 
-    public void setCooldownMs(long ms)
+    public synchronized void shutdown()
     {
-        cooldownMs = Math.max(0, ms);
+        shutdownEngineOnly();
+        started.set(false);
     }
 
-    public boolean isBridgeUp()
+    private void shutdownEngineOnly()
     {
-        return bridgeUp;
-    }
+        SpeechEngine e = engine;
+        engine = null;
 
-    public String getLastBridgeError()
-    {
-        return lastBridgeError;
-    }
-
-    public void checkBridgeNow()
-    {
-        ensureWorker();
-        worker.submit(() ->
-        {
-            bridgeUp = pingHealth();
-            lastHealthCheckAt = System.currentTimeMillis();
-        });
-    }
-
-
-    public void speakTest()
-    {
-        ensureWorker();
-        worker.submit(() -> postToBridge("Accessibility Plus text to speech test."));
-    }
-
-    public void updateFromDialog(String speaker, String dialogText, List<String> options)
-    {
-        // This method can be called from the RuneLite client thread.
-        // Do NOT do any network calls here.
-
-        final String sp = safeTrim(speaker);
-        final String dt = safeTrim(dialogText);
-        final List<String> opts = options == null ? new ArrayList<>() : options;
-
-        final String speakText;
-        final String key;
-
-        if (!opts.isEmpty())
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.append("Options. ");
-            int n = Math.min(9, opts.size());
-            for (int i = 0; i < n; i++)
-            {
-                String o = safeTrim(opts.get(i));
-                if (o.isEmpty())
-                {
-                    continue;
-                }
-                sb.append(i + 1).append(". ").append(o).append(". ");
-            }
-            speakText = sb.toString().trim();
-            key = "OPT|" + normalizeForKey(speakText);
-        }
-        else if (!dt.isEmpty())
-        {
-            speakText = !sp.isEmpty() ? (sp + ". " + dt) : dt;
-            key = "DIA|" + normalizeForKey(speakText);
-        }
-        else
-        {
-            return;
-        }
-
-        if (!shouldSpeakNow(key))
-        {
-            return;
-        }
-
-        ensureWorker();
-
-        // All network work happens on the worker thread.
-        worker.submit(() ->
-        {
-            long now = System.currentTimeMillis();
-            if (now - lastHealthCheckAt > 3000)
-            {
-                bridgeUp = pingHealth();
-                lastHealthCheckAt = now;
-            }
-
-            if (!bridgeUp)
-            {
-                return;
-            }
-
-            postToBridge(speakText);
-        });
-    }
-
-
-    public void shutdown()
-    {
-        ExecutorService w = worker;
-        worker = null;
-
-        if (w != null)
+        if (e != null)
         {
             try
             {
-                w.shutdownNow();
+                e.shutdown();
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        lastSpokenDialogKey = "";
+        lastSpokenOptionsKey = "";
+        lastSpokenAt = 0L;
+        suppressUntil = 0L;
+    }
+
+    /**
+     * Called when the user clicks "continue" or selects a menu option.
+     * We cannot guarantee mid-buffer cut, but we can:
+     * - cancel in-flight HTTP work
+     * - invalidate any queued playback
+     * - suppress repeating the old option list
+     */
+    public void onUserAdvanceDialog()
+    {
+        suppressUntil = System.currentTimeMillis() + 750L;
+
+        SpeechEngine e = engine;
+        if (e != null)
+        {
+            try
+            {
+                e.stopNow();
             }
             catch (Exception ignored)
             {
@@ -180,147 +107,175 @@ public class TtsController
         }
     }
 
-    private void ensureWorker()
+    public void speakTest()
     {
-        if (worker == null || worker.isShutdown() || worker.isTerminated())
+        if (!config.enableTts())
         {
-            worker = Executors.newSingleThreadExecutor(r ->
+            return;
+        }
+
+        SpeechEngine e = engine;
+        if (e == null)
+        {
+            refreshEngine();
+            e = engine;
+        }
+        if (e == null)
+        {
+            return;
+        }
+
+        e.speak("Accessibility Plus text to speech test.");
+    }
+
+    public void updateFromDialog(String speaker, String dialogText, List<String> options)
+    {
+        if (!config.enableTts())
+        {
+            return;
+        }
+
+        SpeechEngine e = engine;
+        if (e == null)
+        {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now < suppressUntil)
+        {
+            return;
+        }
+
+        String dialogKey = buildDialogKey(speaker, dialogText);
+        if (!dialogKey.isEmpty() && shouldSpeakNow(dialogKey, true))
+        {
+            lastSpokenDialogKey = dialogKey;
+            lastSpokenAt = now;
+
+            String phrase = buildDialogPhrase(speaker, dialogText);
+            if (!phrase.isEmpty())
             {
-                Thread t = new Thread(r, "accessibility-plus-tts");
-                t.setDaemon(true);
-                return t;
-            });
+                e.speak(phrase);
+            }
+        }
+
+        if (options != null && !options.isEmpty())
+        {
+            String optionsKey = buildOptionsKey(options);
+            if (!optionsKey.isEmpty() && shouldSpeakNow(optionsKey, false))
+            {
+                lastSpokenOptionsKey = optionsKey;
+                lastSpokenAt = now;
+
+                String phrase = buildOptionsPhrase(options);
+                if (!phrase.isEmpty())
+                {
+                    e.speak(phrase);
+                }
+            }
         }
     }
 
-    private boolean shouldSpeakNow(String key)
+    private boolean shouldSpeakNow(String key, boolean isDialog)
     {
         long now = System.currentTimeMillis();
 
-        if (cooldownMs > 0 && (now - lastSpokenAt) < cooldownMs)
-        {
-            if (Objects.equals(lastSpokenKey, key))
-            {
-                return false;
-            }
-        }
-
-        if (Objects.equals(lastSpokenKey, key))
+        int cooldown = Math.max(0, config.ttsCooldownMs());
+        if (cooldown > 0 && (now - lastSpokenAt) < cooldown)
         {
             return false;
         }
 
-        lastSpokenKey = key;
-        lastSpokenAt = now;
-        return true;
+        if (isDialog)
+        {
+            return !Objects.equals(key, lastSpokenDialogKey);
+        }
+        return !Objects.equals(key, lastSpokenOptionsKey);
     }
 
-    private boolean pingHealth()
+    private static String buildDialogKey(String speaker, String dialogText)
     {
-        String url = bridgeBaseUrl + "/health";
-        Request request = new Request.Builder().url(url).get().build();
+        String s = safe(speaker);
+        String t = safe(dialogText);
 
-        try (Response resp = http.newCall(request).execute())
+        if (t.isEmpty())
         {
-            if (resp.isSuccessful())
-            {
-                lastBridgeError = "";
-                return true;
-            }
-            lastBridgeError = "Health check failed: HTTP " + resp.code();
-            return false;
+            return "";
         }
-        catch (IOException e)
-        {
-            lastBridgeError = "Bridge not reachable: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
-            return false;
-        }
-        catch (Exception e)
-        {
-            lastBridgeError = "Bridge health error: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
-            return false;
-        }
+
+        return s + "|" + t;
     }
 
-    private void postToBridge(String text)
+    private static String buildOptionsKey(List<String> options)
     {
-        String url = bridgeBaseUrl + "/speak";
-        String bodyJson = "{\"text\":\"" + escapeJson(text) + "\"}";
-        RequestBody body = RequestBody.create(JSON, bodyJson);
-
-        Request request = new Request.Builder()
-                .url(url)
-                .post(body)
-                .build();
-
-        try (Response resp = http.newCall(request).execute())
+        StringBuilder sb = new StringBuilder();
+        int n = Math.min(10, options.size());
+        for (int i = 0; i < n; i++)
         {
-            if (!resp.isSuccessful())
+            String o = safe(options.get(i));
+            if (!o.isEmpty())
             {
-                lastBridgeError = "Speak failed: HTTP " + resp.code();
+                sb.append(o);
             }
-            else
-            {
-                lastBridgeError = "";
-            }
+            sb.append('|');
         }
-        catch (IOException e)
-        {
-            // Mark bridge down until next health check
-            bridgeUp = false;
-            lastBridgeError = "Bridge IO exception: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
-        }
-        catch (Exception e)
-        {
-            bridgeUp = false;
-            lastBridgeError = "Bridge exception: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
-        }
+        return sb.toString();
     }
 
-    private static String safeTrim(String s)
+    private String buildDialogPhrase(String speaker, String dialogText)
     {
-        return s == null ? "" : s.trim();
+        String t = safe(dialogText);
+        if (t.isEmpty())
+        {
+            return "";
+        }
+
+        if (config.ttsIncludeSpeaker() && !safe(speaker).isEmpty())
+        {
+            return safe(speaker) + ". " + t;
+        }
+
+        return t;
     }
 
-    private static String normalizeForKey(String s)
+    private String buildOptionsPhrase(List<String> options)
+    {
+        List<String> clean = new ArrayList<>();
+        int n = Math.min(10, options.size());
+        for (int i = 0; i < n; i++)
+        {
+            String o = safe(options.get(i));
+            if (!o.isEmpty())
+            {
+                clean.add(o);
+            }
+        }
+
+        if (clean.isEmpty())
+        {
+            return "";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Options. ");
+        for (int i = 0; i < clean.size(); i++)
+        {
+            sb.append(i + 1).append(". ").append(clean.get(i));
+            if (i + 1 < clean.size())
+            {
+                sb.append(". ");
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String safe(String s)
     {
         if (s == null)
         {
             return "";
         }
-        return s.toLowerCase().replaceAll("\\s+", " ").trim();
-    }
-
-    private static String escapeJson(String s)
-    {
-        if (s == null)
-        {
-            return "";
-        }
-        StringBuilder out = new StringBuilder(s.length() + 16);
-        for (int i = 0; i < s.length(); i++)
-        {
-            char c = s.charAt(i);
-            switch (c)
-            {
-                case '"': out.append("\\\""); break;
-                case '\\': out.append("\\\\"); break;
-                case '\b': out.append("\\b"); break;
-                case '\f': out.append("\\f"); break;
-                case '\n': out.append("\\n"); break;
-                case '\r': out.append("\\r"); break;
-                case '\t': out.append("\\t"); break;
-                default:
-                    if (c < 0x20)
-                    {
-                        out.append(String.format("\\u%04x", (int) c));
-                    }
-                    else
-                    {
-                        out.append(c);
-                    }
-            }
-        }
-        return out.toString();
+        return s.trim();
     }
 }

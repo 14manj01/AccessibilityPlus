@@ -1,30 +1,22 @@
 package com.accessibilityplus;
 
-import com.accessibilityplus.tts.EmbeddedBridgeServer;
 import com.accessibilityplus.tts.TtsController;
 import com.google.inject.Provides;
-
 import java.awt.Rectangle;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
 import javax.inject.Inject;
-
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-
-import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
-import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.widgets.Widget;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.widgets.ComponentID;
-
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.events.ConfigChanged;
@@ -35,9 +27,9 @@ import net.runelite.client.ui.overlay.OverlayManager;
 
 @Slf4j
 @PluginDescriptor(
-        name = "Accessibility Plus",
-        description = "Accessibility improvements: large dialog overlay + minimap shapes + optional TTS via Piper bridge.",
-        tags = {"accessibility", "dialog", "overlay", "tts", "minimap"}
+    name = "Accessibility Plus",
+    description = "Accessibility improvements: large dialog overlay + minimap shapes + optional TTS via cloud service.",
+    tags = {"accessibility", "dialog", "overlay", "tts", "minimap"}
 )
 public class AccessibilityPlusPlugin extends Plugin
 {
@@ -65,10 +57,6 @@ public class AccessibilityPlusPlugin extends Plugin
     @Inject
     private TtsController ttsController;
 
-    @Inject
-    private EmbeddedBridgeServer embeddedBridge;
-    private volatile int embeddedPort = -1;
-
     @Getter
     private String speakerName = "";
 
@@ -87,9 +75,6 @@ public class AccessibilityPlusPlugin extends Plugin
     // --------------------
     // TTS timing / stability helpers
     // --------------------
-    private String lastClientTickDialogKey = "";
-    private boolean dialogActive = false;
-
     private String pendingOptionsKey = "";
     private long pendingOptionsFirstSeenAt = 0L;
 
@@ -120,7 +105,10 @@ public class AccessibilityPlusPlugin extends Plugin
         overlayManager.add(dialogTextOverlay);
         overlayManager.add(minimapShapesOverlay);
 
-        refreshBridgeState();
+        if (ttsController != null)
+        {
+            ttsController.refreshEngine();
+        }
     }
 
     @Override
@@ -140,13 +128,15 @@ public class AccessibilityPlusPlugin extends Plugin
         {
         }
 
-        stopEmbeddedBridge();
-
         speakerName = "";
         dialogText = "";
         chatboxInputOpen = false;
         dialogOptions.clear();
         dialogBounds = null;
+
+        pendingOptionsKey = "";
+        pendingOptionsFirstSeenAt = 0L;
+        cachedOptionRoots.clear();
     }
 
     @Subscribe
@@ -157,27 +147,15 @@ public class AccessibilityPlusPlugin extends Plugin
             return;
         }
 
-        // emulate "button" behavior via boolean toggles
-        if ("checkBridge".equals(event.getKey()) && config.checkBridge())
+        // Emulate "button" behavior via boolean toggle
+        if ("testTts".equals(event.getKey()) && config.testTts())
         {
-            configManager.setConfiguration("accessibilityplus", "checkBridge", false);
+            configManager.setConfiguration("accessibilityplus", "testTts", false);
             clientThread.invokeLater(() ->
             {
-                refreshBridgeState();
-
-                String msg;
-                if (ttsController.isBridgeUp())
-                {
-                    msg = "Accessibility Plus: Speech bridge is running.";
-                }
-                else
-                {
-                    msg = "Accessibility Plus: Speech bridge is NOT running. " + ttsController.getLastBridgeError();
-                }
-
                 try
                 {
-                    client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", msg, null);
+                    ttsController.speakTest();
                 }
                 catch (Exception ignored)
                 {
@@ -186,193 +164,36 @@ public class AccessibilityPlusPlugin extends Plugin
             return;
         }
 
-        if ("testTts".equals(event.getKey()) && config.testTts())
+        // Rebuild speech engine on relevant config changes
+        String key = event.getKey();
+        if ("enableTts".equals(key) || key.startsWith("cloudTts") || key.startsWith("tts"))
         {
-            configManager.setConfiguration("accessibilityplus", "testTts", false);
             clientThread.invokeLater(() ->
             {
-                refreshBridgeState();
-
-                if (ttsController.isBridgeUp())
+                try
                 {
-                    ttsController.speakTest();
-                    try
-                    {
-                        client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "Accessibility Plus: Sent test phrase.", null);
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
+                    ttsController.refreshEngine();
                 }
-                else
+                catch (Exception ignored)
                 {
-                    String msg = "Accessibility Plus: Speech bridge is NOT running. " + ttsController.getLastBridgeError();
-                    try
-                    {
-                        client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", msg, null);
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
                 }
             });
-            return;
         }
-
-        // Any relevant change: re-evaluate whether embedded bridge should be running.
-        refreshBridgeState();
-    }
-
-    private void refreshBridgeState()
-    {
-        // Start embedded bridge if TTS enabled and backend is BRIDGE and toggle is on.
-        if (config.enableTts()
-                && config.ttsBackend() == AccessibilityPlusConfig.SpeechBackend.BRIDGE
-                && config.startEmbeddedBridge())
-        {
-            ensureEmbeddedBridge();
-            if (embeddedPort > 0)
-            {
-                ttsController.setBridgeBaseUrl("http://127.0.0.1:" + embeddedPort);
-            }
-            else
-            {
-                // fallback to whatever user configured as external bridge
-                ttsController.setBridgeBaseUrl(config.bridgeBaseUrl());
-            }
-        }
-        else
-        {
-            stopEmbeddedBridge();
-            ttsController.setBridgeBaseUrl(config.bridgeBaseUrl());
-        }
-
-        ttsController.setCooldownMs(config.ttsCooldownMs());
-        ttsController.checkBridgeNow();
-    }
-
-    private void ensureEmbeddedBridge()
-    {
-        int desiredPort = config.embeddedBridgePort();
-        String piperPath = config.piperPath();
-        String modelPath = config.piperModelPath();
-
-        // Already running on same port
-        if (embeddedBridge.isRunning() && embeddedPort == desiredPort)
-        {
-            return;
-        }
-
-        stopEmbeddedBridge();
-
-        try
-        {
-            embeddedBridge.start(desiredPort, piperPath, modelPath);
-            embeddedPort = desiredPort;
-        }
-        catch (IOException bindFailed)
-        {
-            embeddedPort = -1;
-        }
-        catch (Exception ignored)
-        {
-            embeddedPort = -1;
-        }
-    }
-
-    private void stopEmbeddedBridge()
-    {
-        try
-        {
-            embeddedBridge.stop();
-        }
-        catch (Exception ignored)
-        {
-        }
-        embeddedPort = -1;
     }
 
     @Subscribe
-    public void onClientTick(ClientTick tick)
+    public void onMenuOptionClicked(MenuOptionClicked ev)
     {
-        if (client == null || client.getGameState() != GameState.LOGGED_IN)
-        {
-            lastClientTickDialogKey = "";
-            dialogActive = false;
-            return;
-        }
-
-        // If the dialog UI just closed, stop any ongoing/queued TTS immediately.
-        Widget npcTextW = client.getWidget(ComponentID.DIALOG_NPC_TEXT);
-        Widget playerTextW = client.getWidget(ComponentID.DIALOG_PLAYER_TEXT);
-
-        boolean hasDialogWidgets =
-                (npcTextW != null && !isBlank(clean(getTextSafe(npcTextW))))
-                        || (playerTextW != null && !isBlank(clean(getTextSafe(playerTextW))));
-
-        // This catches Perdu / banker / GE style headers even when dialog widgets are empty
-        boolean hasOptionHeader = hasOptionMenuHeaderQuick();
-
-        // This catches options-only dialogs after the options are populated
-        boolean hasOptions = dialogOptions != null && !dialogOptions.isEmpty();
-
-        boolean nowActive = hasDialogWidgets || hasOptionHeader || hasOptions;
-
-        if (dialogActive && !nowActive)
-        {
-            try
-            {
-                embeddedBridge.stopSpeechNow();
-            }
-            catch (Exception ignored)
-            {
-            }
-            lastClientTickDialogKey = "";
-        }
-
-        dialogActive = nowActive;
-
-        if (!config.enableTts() || config.ttsBackend() != AccessibilityPlusConfig.SpeechBackend.BRIDGE)
+        if (ttsController == null || !config.enableTts())
         {
             return;
         }
 
-        // Speak dialog as soon as it changes, without waiting for the next GameTick.
-        // Keep this lightweight: only read the direct dialog widgets.
-        String npcName = clean(getTextSafe(ComponentID.DIALOG_NPC_NAME));
-        String npcText = clean(getTextSafe(ComponentID.DIALOG_NPC_TEXT));
-        String playerText = clean(getTextSafe(ComponentID.DIALOG_PLAYER_TEXT));
-
-        String speaker;
-        String dialog;
-
-        if (!isBlank(npcText))
-        {
-            speaker = isBlank(npcName) ? "" : npcName;
-            dialog = npcText;
-        }
-        else if (!isBlank(playerText))
-        {
-            speaker = "You";
-            dialog = playerText;
-        }
-        else
-        {
-            speaker = "";
-            dialog = "";
-        }
-
-        String speakSpeaker = config.ttsIncludeSpeaker() ? speaker : "";
-        String speakDialog = config.ttsSpeakDialog() ? dialog : "";
-
-        String key = speakSpeaker + "||" + speakDialog;
-        if (!key.equals(lastClientTickDialogKey))
-        {
-            lastClientTickDialogKey = key;
-
-            // Do NOT pass options here. Options are spoken later (when stable) on GameTick.
-            ttsController.updateFromDialog(speakSpeaker, speakDialog, null);
-        }
+        // When the user clicks to continue or chooses an option, immediately stop current playback
+        // and suppress reading the old option list again.
+        ttsController.onUserAdvanceDialog();
+        pendingOptionsKey = "";
+        pendingOptionsFirstSeenAt = 0L;
     }
 
     @Subscribe
@@ -424,17 +245,15 @@ public class AccessibilityPlusPlugin extends Plugin
 
         updateDialogOptionsAndBounds();
 
-        if (config.enableTts() && ttsController != null && config.ttsBackend() == AccessibilityPlusConfig.SpeechBackend.BRIDGE)
+        if (config.enableTts() && ttsController != null)
         {
-            ttsController.setCooldownMs(config.ttsCooldownMs());
-
-            String speakSpeaker = config.ttsIncludeSpeaker() ? speakerName : "";
-            String speakDialog = config.ttsSpeakDialog() ? dialogText : "";
+            String speakSpeaker = speakerName;
+            String speakDialog = dialogText;
 
             List<String> speakOptions = null;
 
-            // Speak options only after they stabilize, so we don't announce partial lists as they populate.
-            if (config.ttsSpeakOptions() && dialogOptions != null && !dialogOptions.isEmpty())
+            // Only attempt to speak options when there are options on screen.
+            if (!dialogOptions.isEmpty())
             {
                 StringBuilder sb = new StringBuilder();
                 int n = Math.min(10, dialogOptions.size());
@@ -479,18 +298,6 @@ public class AccessibilityPlusPlugin extends Plugin
         return chatboxInput != null && !chatboxInput.isHidden();
     }
 
-    private String getTextSafe(Widget w)
-    {
-        try
-        {
-            return w == null ? null : w.getText();
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-    }
-
     private String getTextSafe(int componentId)
     {
         try
@@ -502,102 +309,6 @@ public class AccessibilityPlusPlugin extends Plugin
         {
             return null;
         }
-    }
-
-    // ----------------------------
-    // NEW: quick header detection (safe for ClientTick)
-    // ----------------------------
-    private boolean hasOptionMenuHeaderQuick()
-    {
-        // Fast path: official option container
-        try
-        {
-            Widget opt = client.getWidget(ComponentID.DIALOG_OPTION_OPTIONS);
-            if (opt != null && !opt.isHidden())
-            {
-                if (containsOptionMenuHeaderText(opt, 0))
-                {
-                    return true;
-                }
-            }
-        }
-        catch (Exception ignored)
-        {
-        }
-
-        // Fallback: check cached roots we already found during scans
-        try
-        {
-            for (WidgetRef ref : cachedOptionRoots)
-            {
-                Widget root = client.getWidget(ref.group, ref.child);
-                if (root == null || root.isHidden())
-                {
-                    continue;
-                }
-                if (containsOptionMenuHeaderText(root, 0))
-                {
-                    return true;
-                }
-            }
-        }
-        catch (Exception ignored)
-        {
-        }
-
-        return false;
-    }
-
-    private boolean containsOptionMenuHeaderText(Widget w, int depth)
-    {
-        if (w == null || w.isHidden() || depth > 10)
-        {
-            return false;
-        }
-
-        String t = clean(getTextSafe(w)).toLowerCase();
-        if (isOptionMenuHeaderText(t))
-        {
-            return true;
-        }
-
-        Widget[] children = w.getChildren();
-        if (children != null)
-        {
-            for (Widget c : children)
-            {
-                if (containsOptionMenuHeaderText(c, depth + 1))
-                {
-                    return true;
-                }
-            }
-        }
-
-        Widget[] staticChildren = w.getStaticChildren();
-        if (staticChildren != null)
-        {
-            for (Widget c : staticChildren)
-            {
-                if (containsOptionMenuHeaderText(c, depth + 1))
-                {
-                    return true;
-                }
-            }
-        }
-
-        Widget[] dyn = w.getDynamicChildren();
-        if (dyn != null)
-        {
-            for (Widget c : dyn)
-            {
-                if (containsOptionMenuHeaderText(c, depth + 1))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     private void updateDialogOptionsAndBounds()
@@ -613,7 +324,6 @@ public class AccessibilityPlusPlugin extends Plugin
         final int[] candidateGroups = new int[]{219, 231, 193, 162, 161};
         final int maxChildScan = 1400;
 
-        // Find the root(s) that contain the option menu header
         final List<WidgetRef> rootsToScan = new ArrayList<>();
 
         for (WidgetRef ref : cachedOptionRoots)
@@ -631,7 +341,6 @@ public class AccessibilityPlusPlugin extends Plugin
 
         if (rootsToScan.isEmpty())
         {
-            // Fallback: scan until we find a few plausible roots, then cache them.
             outer:
             for (int group : candidateGroups)
             {
@@ -675,8 +384,8 @@ public class AccessibilityPlusPlugin extends Plugin
         }
 
         candidates.sort(Comparator
-                .comparingInt((OptionCandidate c) -> c.bounds != null ? c.bounds.y : Integer.MAX_VALUE)
-                .thenComparingInt(c -> c.bounds != null ? c.bounds.x : Integer.MAX_VALUE));
+            .comparingInt((OptionCandidate c) -> c.bounds != null ? c.bounds.y : Integer.MAX_VALUE)
+            .thenComparingInt(c -> c.bounds != null ? c.bounds.x : Integer.MAX_VALUE));
 
         Map<String, Boolean> seen = new LinkedHashMap<>();
         for (OptionCandidate c : candidates)
@@ -765,11 +474,10 @@ public class AccessibilityPlusPlugin extends Plugin
             return false;
         }
 
-        // Common OSRS prompt headers for option menus
         return lowerText.contains("select an option")
-                || lowerText.contains("what would you like to say")
-                || lowerText.contains("what would you like to do")
-                || lowerText.contains("what would you like to ask");
+            || lowerText.contains("what would you like to say")
+            || lowerText.contains("what would you like to do")
+            || lowerText.contains("what would you like to ask");
     }
 
     private boolean containsSelectAnOption(Widget w, int depth)
@@ -837,7 +545,6 @@ public class AccessibilityPlusPlugin extends Plugin
         {
             String lower = t.toLowerCase();
 
-            // Header line should not become an option, but should count toward bounds
             if (isOptionMenuHeaderText(lower))
             {
                 unionBounds(w);
@@ -880,7 +587,7 @@ public class AccessibilityPlusPlugin extends Plugin
     private static boolean isChatTabLabel(String lower)
     {
         return lower.equals("all") || lower.equals("game") || lower.equals("public") || lower.equals("private")
-                || lower.equals("channel") || lower.equals("clan") || lower.equals("trade") || lower.equals("friends");
+            || lower.equals("channel") || lower.equals("clan") || lower.equals("trade") || lower.equals("friends");
     }
 
     private static boolean looksLikeOptionLabel(String t)
@@ -988,8 +695,8 @@ public class AccessibilityPlusPlugin extends Plugin
             return "";
         }
         return s.replaceAll("<[^>]*>", " ")
-                .replace('\u00A0', ' ')
-                .trim()
-                .replaceAll("\\s+", " ");
+            .replace('\u00A0', ' ')
+            .trim()
+            .replaceAll("\\s+", " ");
     }
 }

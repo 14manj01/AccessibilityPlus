@@ -14,9 +14,8 @@ public class WavPlayer
     private final AudioPlayer audioPlayer;
 
     /**
-     * Used to invalidate in-flight work when we "stop".
-     * AudioPlayer does not expose a hard stop API, so we prevent new playbacks
-     * that belong to an older generation.
+     * Used to invalidate any in-flight or queued audio.
+     * RuneLite does not allow hard stop; this prevents stale playback.
      */
     private final AtomicLong generation = new AtomicLong(0);
 
@@ -27,18 +26,24 @@ public class WavPlayer
     }
 
     /**
-     * Cancels any queued or about-to-play audio.
-     * This cannot forcibly stop a clip already playing via AudioPlayer,
-     * but it prevents stale generations from starting.
+     * Invalidate all current and pending audio.
+     * Call this when the user clicks a dialog option.
      */
-    public void stopNow()
+    public long bumpGeneration()
     {
-        generation.incrementAndGet();
+        return generation.incrementAndGet();
     }
 
     /**
-     * Plays the wav file only if the generation hasn't changed.
-     * Gain uses AudioPlayer's float parameter, where 0.0f is typically "no change".
+     * Snapshot the current generation.
+     */
+    public long currentGeneration()
+    {
+        return generation.get();
+    }
+
+    /**
+     * Play only if this audio still belongs to the current generation.
      */
     public void playIfCurrent(File wavFile, long expectedGeneration)
     {
@@ -54,20 +59,11 @@ public class WavPlayer
 
         try
         {
-            // 0.0f is "no gain adjustment" for most AudioPlayer implementations.
             audioPlayer.play(wavFile, 0.0f);
         }
         catch (Exception e)
         {
             log.debug("Audio playback failed: {}", e.toString());
         }
-    }
-
-    /**
-     * Snapshot the current generation so callers can guard playback.
-     */
-    public long currentGeneration()
-    {
-        return generation.get();
     }
 }
