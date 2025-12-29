@@ -5,8 +5,7 @@ import com.accessibilityplus.AccessibilityPlusConfig;
 /**
  * Creates a SpeechEngine from config.
  *
- * Not currently used by AccessibilityPlusPlugin (which uses TtsController),
- * but kept for future expansion.
+ * Plugin Hub safe: Bridge-only. No FreeTTS references or dependencies.
  */
 public final class SpeechEngineFactory
 {
@@ -16,41 +15,32 @@ public final class SpeechEngineFactory
 
     public static SpeechEngine create(AccessibilityPlusConfig config)
     {
-        if (config == null)
+        // Default endpoint if config is missing or incomplete
+        String base = "http://127.0.0.1:59125";
+        int timeoutMs = 5000;
+
+        if (config != null)
         {
-            return new FreeTtsSpeechEngine();
+            if (config.bridgeBaseUrl() != null && !config.bridgeBaseUrl().trim().isEmpty())
+            {
+                base = config.bridgeBaseUrl().trim();
+            }
+            timeoutMs = config.ttsBridgeTimeoutMs();
         }
 
-        AccessibilityPlusConfig.SpeechBackend backend = config.ttsBackend();
-        if (backend == null)
+        String endpoint = base;
+        if (!endpoint.endsWith("/speak"))
         {
-            backend = AccessibilityPlusConfig.SpeechBackend.BRIDGE;
+            if (endpoint.endsWith("/"))
+            {
+                endpoint = endpoint + "speak";
+            }
+            else
+            {
+                endpoint = endpoint + "/speak";
+            }
         }
 
-        switch (backend)
-        {
-            case BRIDGE:
-                String base = config.bridgeBaseUrl();
-                if (base == null || base.trim().isEmpty())
-                {
-                    base = "http://127.0.0.1:59125";
-                }
-                String endpoint = base.trim();
-                if (!endpoint.endsWith("/speak"))
-                {
-                    if (endpoint.endsWith("/"))
-                    {
-                        endpoint = endpoint + "speak";
-                    }
-                    else
-                    {
-                        endpoint = endpoint + "/speak";
-                    }
-                }
-                return new BridgeSpeechEngine(endpoint, config.ttsBridgeTimeoutMs());
-            case FREETTS:
-            default:
-                return new FreeTtsSpeechEngine();
-        }
+        return new BridgeSpeechEngine(endpoint, timeoutMs);
     }
 }

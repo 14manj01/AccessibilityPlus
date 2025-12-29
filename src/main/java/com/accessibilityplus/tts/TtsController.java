@@ -1,5 +1,6 @@
 package com.accessibilityplus.tts;
 
+import javax.inject.Inject;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,16 +35,13 @@ public class TtsController
     private volatile long lastHealthCheckAt = 0L;
     private volatile String lastBridgeError = "";
 
-    public TtsController()
+        @Inject
+    public TtsController(OkHttpClient http)
     {
-        this.http = new OkHttpClient.Builder()
-            .callTimeout(2, TimeUnit.SECONDS)
-            .connectTimeout(1, TimeUnit.SECONDS)
-            .readTimeout(2, TimeUnit.SECONDS)
-            .build();
+        this.http = http;
     }
 
-    public void setBridgeBaseUrl(String url)
+public void setBridgeBaseUrl(String url)
     {
         if (url == null || url.trim().isEmpty())
         {

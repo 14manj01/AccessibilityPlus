@@ -23,7 +23,7 @@ import net.runelite.api.GameState;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.widgets.Widget;
-import net.runelite.api.widgets.WidgetInfo;
+import net.runelite.api.widgets.ComponentID;
 
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -302,8 +302,8 @@ public class AccessibilityPlusPlugin extends Plugin
         }
 
         // If the dialog UI just closed, stop any ongoing/queued TTS immediately.
-        Widget npcTextW = client.getWidget(WidgetInfo.DIALOG_NPC_TEXT);
-        Widget playerTextW = client.getWidget(WidgetInfo.DIALOG_PLAYER_TEXT);
+        Widget npcTextW = client.getWidget(ComponentID.DIALOG_NPC_TEXT);
+        Widget playerTextW = client.getWidget(ComponentID.DIALOG_PLAYER_TEXT);
 
         boolean hasDialogWidgets =
                 (npcTextW != null && !isBlank(clean(getTextSafe(npcTextW))))
@@ -338,9 +338,9 @@ public class AccessibilityPlusPlugin extends Plugin
 
         // Speak dialog as soon as it changes, without waiting for the next GameTick.
         // Keep this lightweight: only read the direct dialog widgets.
-        String npcName = clean(getTextSafe(WidgetInfo.DIALOG_NPC_NAME));
-        String npcText = clean(getTextSafe(WidgetInfo.DIALOG_NPC_TEXT));
-        String playerText = clean(getTextSafe(WidgetInfo.DIALOG_PLAYER_TEXT));
+        String npcName = clean(getTextSafe(ComponentID.DIALOG_NPC_NAME));
+        String npcText = clean(getTextSafe(ComponentID.DIALOG_NPC_TEXT));
+        String playerText = clean(getTextSafe(ComponentID.DIALOG_PLAYER_TEXT));
 
         String speaker;
         String dialog;
@@ -398,8 +398,8 @@ public class AccessibilityPlusPlugin extends Plugin
             return;
         }
 
-        String npcName = getTextSafe(WidgetInfo.DIALOG_NPC_NAME);
-        String npcText = getTextSafe(WidgetInfo.DIALOG_NPC_TEXT);
+        String npcName = getTextSafe(ComponentID.DIALOG_NPC_NAME);
+        String npcText = getTextSafe(ComponentID.DIALOG_NPC_TEXT);
 
         if (!isBlank(npcText))
         {
@@ -408,7 +408,7 @@ public class AccessibilityPlusPlugin extends Plugin
         }
         else
         {
-            String playerText = getTextSafe(WidgetInfo.DIALOG_PLAYER_TEXT);
+            String playerText = getTextSafe(ComponentID.DIALOG_PLAYER_TEXT);
             if (!isBlank(playerText))
             {
                 speakerName = "You";
@@ -474,7 +474,7 @@ public class AccessibilityPlusPlugin extends Plugin
 
     private boolean isChatboxTyping()
     {
-        Widget chatboxInput = client.getWidget(WidgetInfo.CHATBOX_INPUT);
+        Widget chatboxInput = client.getWidget(ComponentID.CHATBOX_INPUT);
         return chatboxInput != null && !chatboxInput.isHidden();
     }
 
@@ -490,11 +490,11 @@ public class AccessibilityPlusPlugin extends Plugin
         }
     }
 
-    private String getTextSafe(WidgetInfo info)
+    private String getTextSafe(int componentId)
     {
         try
         {
-            Widget w = client.getWidget(info);
+            Widget w = client.getWidget(componentId);
             return w == null ? null : w.getText();
         }
         catch (Exception e)
@@ -511,7 +511,7 @@ public class AccessibilityPlusPlugin extends Plugin
         // Fast path: official option container
         try
         {
-            Widget opt = client.getWidget(WidgetInfo.DIALOG_OPTION_OPTIONS);
+            Widget opt = client.getWidget(ComponentID.DIALOG_OPTION_OPTIONS);
             if (opt != null && !opt.isHidden())
             {
                 if (containsOptionMenuHeaderText(opt, 0))
@@ -605,9 +605,9 @@ public class AccessibilityPlusPlugin extends Plugin
         dialogBounds = null;
 
         // Anchor bounds to actual dialog widgets (safe, small)
-        unionBounds(client.getWidget(WidgetInfo.DIALOG_NPC_TEXT));
-        unionBounds(client.getWidget(WidgetInfo.DIALOG_PLAYER_TEXT));
-        unionBounds(client.getWidget(WidgetInfo.DIALOG_NPC_NAME));
+        unionBounds(client.getWidget(ComponentID.DIALOG_NPC_TEXT));
+        unionBounds(client.getWidget(ComponentID.DIALOG_PLAYER_TEXT));
+        unionBounds(client.getWidget(ComponentID.DIALOG_NPC_NAME));
 
         final int[] candidateGroups = new int[]{219, 231, 193, 162, 161};
         final int maxChildScan = 1400;
