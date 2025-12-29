@@ -6,7 +6,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +21,7 @@ public class CloudSpeechEngine implements SpeechEngine
 {
     private final OkHttpClient http;
     private final AccessibilityPlusConfig config;
-    private final ExecutorService executor;
+    private final ScheduledExecutorService executor;
     private final WavPlayer wavPlayer;
 
     private volatile Call inFlight;
@@ -30,7 +30,7 @@ public class CloudSpeechEngine implements SpeechEngine
     public CloudSpeechEngine(
             OkHttpClient http,
             AccessibilityPlusConfig config,
-            ExecutorService executor,
+            ScheduledExecutorService executor,
             WavPlayer wavPlayer
     )
     {
@@ -79,8 +79,6 @@ public class CloudSpeechEngine implements SpeechEngine
             {
                 String base = config.cloudTtsBaseUrl().trim();
 
-                // Match the "TTS" plugin style:
-                // https://ttsplugin.com?m=<text>&r=<rate>&v=<voice>
                 String url = base
                         + "?m=" + URLEncoder.encode(text, StandardCharsets.UTF_8.name())
                         + "&r=" + config.cloudTtsRate()
@@ -103,7 +101,6 @@ public class CloudSpeechEngine implements SpeechEngine
 
                     byte[] wav = res.body().bytes();
 
-                    // Drop late responses if user clicked through
                     if (wavPlayer.currentGeneration() != gen)
                     {
                         return;
@@ -122,7 +119,6 @@ public class CloudSpeechEngine implements SpeechEngine
             }
             catch (IOException e)
             {
-                // Most common path when user clicks quickly
                 if (!"Canceled".equalsIgnoreCase(e.getMessage()))
                 {
                     log.debug("Cloud TTS failed: {}", e.toString());

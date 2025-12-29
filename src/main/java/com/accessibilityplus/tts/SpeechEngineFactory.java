@@ -1,7 +1,7 @@
 package com.accessibilityplus.tts;
 
 import com.accessibilityplus.AccessibilityPlusConfig;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import okhttp3.OkHttpClient;
@@ -11,14 +11,14 @@ public class SpeechEngineFactory
 {
     private final AccessibilityPlusConfig config;
     private final OkHttpClient http;
-    private final ExecutorService executor;
+    private final ScheduledExecutorService executor;
     private final WavPlayer wavPlayer;
 
     @Inject
     public SpeechEngineFactory(
             AccessibilityPlusConfig config,
             OkHttpClient http,
-            ExecutorService executor,
+            ScheduledExecutorService executor,
             WavPlayer wavPlayer
     )
     {
@@ -35,7 +35,6 @@ public class SpeechEngineFactory
             return new NoopSpeechEngine();
         }
 
-        // Cloud TTS only (no subprocess, hub-compliant)
         return new CloudSpeechEngine(http, config, executor, wavPlayer);
     }
 }
