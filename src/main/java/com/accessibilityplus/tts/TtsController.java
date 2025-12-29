@@ -1,14 +1,12 @@
 package com.accessibilityplus.tts;
 
-import javax.inject.Inject;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-
+import javax.inject.Inject;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -27,27 +25,44 @@ public class TtsController
 
     private final OkHttpClient http;
 
-    // Lazy so it can be recreated after shutdown/reload
     private volatile ExecutorService worker;
 
-    // Bridge status
     private volatile boolean bridgeUp = false;
     private volatile long lastHealthCheckAt = 0L;
     private volatile String lastBridgeError = "";
 
-        @Inject
+    @Inject
     public TtsController(OkHttpClient http)
     {
         this.http = http;
     }
 
-public void setBridgeBaseUrl(String url)
+    public void setBridgeBaseUrl(String url)
     {
         if (url == null || url.trim().isEmpty())
         {
             return;
         }
-        bridgeBaseUrl = url.trim();
+
+        String u = url.trim();
+
+        // Strip trailing /speak or /health if user pasted an endpoint URL
+        if (u.endsWith("/speak"))
+        {
+            u = u.substring(0, u.length() - "/speak".length());
+        }
+        if (u.endsWith("/health"))
+        {
+            u = u.substring(0, u.length() - "/health".length());
+        }
+
+        // Strip trailing slash
+        while (u.endsWith("/"))
+        {
+            u = u.substring(0, u.length() - 1);
+        }
+
+        bridgeBaseUrl = u;
     }
 
     public void setCooldownMs(long ms)
@@ -67,9 +82,14 @@ public void setBridgeBaseUrl(String url)
 
     public void checkBridgeNow()
     {
-        bridgeUp = pingHealth();
-        lastHealthCheckAt = System.currentTimeMillis();
+        ensureWorker();
+        worker.submit(() ->
+        {
+            bridgeUp = pingHealth();
+            lastHealthCheckAt = System.currentTimeMillis();
+        });
     }
+
 
     public void speakTest()
     {
@@ -79,17 +99,8 @@ public void setBridgeBaseUrl(String url)
 
     public void updateFromDialog(String speaker, String dialogText, List<String> options)
     {
-        long now = System.currentTimeMillis();
-        if (now - lastHealthCheckAt > 3000)
-        {
-            bridgeUp = pingHealth();
-            lastHealthCheckAt = now;
-        }
-
-        if (!bridgeUp)
-        {
-            return;
-        }
+        // This method can be called from the RuneLite client thread.
+        // Do NOT do any network calls here.
 
         final String sp = safeTrim(speaker);
         final String dt = safeTrim(dialogText);
@@ -132,23 +143,25 @@ public void setBridgeBaseUrl(String url)
 
         ensureWorker();
 
-        try
+        // All network work happens on the worker thread.
+        worker.submit(() ->
         {
-            worker.submit(() -> postToBridge(speakText));
-        }
-        catch (RuntimeException ex)
-        {
-            worker = null;
-            ensureWorker();
-            try
+            long now = System.currentTimeMillis();
+            if (now - lastHealthCheckAt > 3000)
             {
-                worker.submit(() -> postToBridge(speakText));
+                bridgeUp = pingHealth();
+                lastHealthCheckAt = now;
             }
-            catch (RuntimeException ignored)
+
+            if (!bridgeUp)
             {
+                return;
             }
-        }
+
+            postToBridge(speakText);
+        });
     }
+
 
     public void shutdown()
     {
@@ -219,7 +232,12 @@ public void setBridgeBaseUrl(String url)
         }
         catch (IOException e)
         {
-            lastBridgeError = "Bridge not reachable: " + e.getClass().getSimpleName();
+            lastBridgeError = "Bridge not reachable: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
+            return false;
+        }
+        catch (Exception e)
+        {
+            lastBridgeError = "Bridge health error: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
             return false;
         }
     }
@@ -231,16 +249,31 @@ public void setBridgeBaseUrl(String url)
         RequestBody body = RequestBody.create(JSON, bodyJson);
 
         Request request = new Request.Builder()
-            .url(url)
-            .post(body)
-            .build();
+                .url(url)
+                .post(body)
+                .build();
 
         try (Response resp = http.newCall(request).execute())
         {
-            // ignore body
+            if (!resp.isSuccessful())
+            {
+                lastBridgeError = "Speak failed: HTTP " + resp.code();
+            }
+            else
+            {
+                lastBridgeError = "";
+            }
         }
-        catch (Exception ignored)
+        catch (IOException e)
         {
+            // Mark bridge down until next health check
+            bridgeUp = false;
+            lastBridgeError = "Bridge IO exception: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
+        }
+        catch (Exception e)
+        {
+            bridgeUp = false;
+            lastBridgeError = "Bridge exception: " + e.getClass().getSimpleName() + " " + safeTrim(e.getMessage());
         }
     }
 
@@ -270,7 +303,7 @@ public void setBridgeBaseUrl(String url)
             char c = s.charAt(i);
             switch (c)
             {
-                case '\"': out.append("\\\""); break;
+                case '"': out.append("\\\""); break;
                 case '\\': out.append("\\\\"); break;
                 case '\b': out.append("\\b"); break;
                 case '\f': out.append("\\f"); break;

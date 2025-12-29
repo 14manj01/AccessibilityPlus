@@ -1,6 +1,5 @@
 package com.accessibilityplus.tts;
 
-import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -30,11 +29,10 @@ public class EmbeddedBridgeServer
 
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Piper config (set on start)
     private volatile String piperExePath = "";
     private volatile String voiceModelPath = "";
 
-    // Used to kill pending / queued speech when leaving chat
+    // Used to invalidate pending / queued speech when leaving chat
     private volatile long speechGeneration = 0;
 
     @Inject
@@ -110,7 +108,6 @@ public class EmbeddedBridgeServer
         server = null;
         executor = null;
 
-        // Invalidate any pending speech
         stopSpeechNow();
 
         log.info("Embedded bridge stopped");
@@ -169,16 +166,16 @@ public class EmbeddedBridgeServer
                 return;
             }
 
-            // Immediately ACK so the client doesn't block on piper runtime
-            ex.sendResponseHeaders(204, -1);
-            ex.close();
-
-            // Do work async
             ExecutorService exr = executor;
             if (exr == null)
             {
+                ex.sendResponseHeaders(503, -1);
                 return;
             }
+
+            // Immediate ACK, do work async
+            ex.sendResponseHeaders(204, -1);
+            ex.close();
 
             exr.submit(() ->
             {
@@ -187,7 +184,6 @@ public class EmbeddedBridgeServer
                     return;
                 }
 
-                // Cancelled before we started
                 if (myGen != speechGeneration)
                 {
                     return;
@@ -196,38 +192,28 @@ public class EmbeddedBridgeServer
                 File wav = null;
                 try
                 {
+                    if (piperExePath.isEmpty() || voiceModelPath.isEmpty())
+                    {
+                        log.warn("Bridge speak ignored: piper path or model path is empty");
+                        return;
+                    }
+
                     wav = PiperRunner.runToWav(piperExePath, voiceModelPath, text);
 
-                    // Cancelled while piper was running
                     if (myGen != speechGeneration)
                     {
                         return;
                     }
 
-                    // Play only if still current
-                    wavPlayer.playIfCurrent(wav, wavPlayer.currentGeneration());
+                    // IMPORTANT:
+                    // AudioPlayer plays asynchronously, so do NOT delete wav immediately.
+                    // Let temp cleanup happen later.
+                    long gen = wavPlayer.currentGeneration();
+                    wavPlayer.playIfCurrent(wav, gen);
                 }
                 catch (Exception e)
                 {
-                    log.debug("Speak failed: {}", e.toString());
-                }
-                finally
-                {
-                    if (wav != null)
-                    {
-                        try
-                        {
-                            // best-effort cleanup
-                            if (wav.exists())
-                            {
-                                //noinspection ResultOfMethodCallIgnored
-                                wav.delete();
-                            }
-                        }
-                        catch (Exception ignored)
-                        {
-                        }
-                    }
+                    log.warn("Bridge speak failed: {}", e.toString());
                 }
             });
         }
@@ -235,8 +221,6 @@ public class EmbeddedBridgeServer
 
     private static String extractTextFromJson(String body)
     {
-        // Minimal JSON extraction: {"text":"..."}
-        // We avoid adding JSON libs for Plugin Hub.
         if (body == null)
         {
             return "";
@@ -332,8 +316,7 @@ public class EmbeddedBridgeServer
                 case 'n': out.append('\n'); break;
                 case 'r': out.append('\r'); break;
                 case 't': out.append('\t'); break;
-                default:
-                    out.append(c);
+                default: out.append(c);
             }
         }
 
