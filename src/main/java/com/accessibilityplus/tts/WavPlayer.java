@@ -4,10 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import javax.sound.sampled.AudioInputStream;
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.Clip;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.audio.AudioPlayer;
 
 @Slf4j
 @Singleton
@@ -15,17 +13,45 @@ public class WavPlayer
 {
     /**
      * Used to invalidate any in-flight or queued audio.
-     * We also stop/close the current Clip when generation bumps.
+     * Bumping generation also triggers a best-effort hard cut.
      */
     private final AtomicLong generation = new AtomicLong(0);
 
-    private final Object clipLock = new Object();
-    private Clip currentClip;
+    /**
+     * AudioPlayer has no explicit stop API.
+     * We approximate a hard cut by immediately playing a tiny silent WAV.
+     */
+    private static final float SPEECH_GAIN_DB = 0.0f;
+    private static final float SILENT_GAIN_DB = -80.0f;
+
+    // 10ms of silence, 8kHz, 16-bit, mono PCM WAV.
+    private static final byte[] SILENT_WAV = new byte[] {
+            82, 73, 70, 70, -60, 0, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32,
+            16, 0, 0, 0, 1, 0, 1, 0, 64, 31, 0, 0, -128, 62, 0, 0,
+            2, 0, 16, 0, 100, 97, 116, 97, -96, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+
+    private final AudioPlayer audioPlayer;
+
+    /**
+     * Serialize AudioPlayer calls so overlapping requests do not interleave.
+     */
+    private final Object playLock = new Object();
 
     @Inject
-    public WavPlayer()
+    public WavPlayer(final AudioPlayer audioPlayer)
     {
-        // No RuneLite AudioPlayer; pure Java Sound Clip for Plugin Hub friendliness.
+        this.audioPlayer = audioPlayer;
     }
 
     /**
@@ -35,7 +61,7 @@ public class WavPlayer
     public long bumpGeneration()
     {
         long gen = generation.incrementAndGet();
-        stopCurrentClip();
+        hardCutBestEffort();
         return gen;
     }
 
@@ -49,8 +75,13 @@ public class WavPlayer
 
     /**
      * Play WAV bytes only if this audio still belongs to the current generation.
+     *
+     * IMPORTANT:
+     * - No Java Sound usage (Plugin Hub rejection)
+     * - No disk writes
+     * - Audio is played from an in-memory stream via RuneLite's AudioPlayer
      */
-    public void playBytesIfCurrent(byte[] wavBytes, long expectedGeneration)
+    public void playBytesIfCurrent(final byte[] wavBytes, final long expectedGeneration)
     {
         if (wavBytes == null || wavBytes.length == 0)
         {
@@ -62,81 +93,35 @@ public class WavPlayer
             return;
         }
 
-        synchronized (clipLock)
+        synchronized (playLock)
         {
             if (generation.get() != expectedGeneration)
             {
                 return;
             }
 
-            stopCurrentClipLocked();
-
-            try (ByteArrayInputStream bais = new ByteArrayInputStream(wavBytes);
-                 AudioInputStream ais = AudioSystem.getAudioInputStream(bais))
+            try
             {
-                Clip clip = AudioSystem.getClip();
-                clip.open(ais);
-
-                // If generation changes while we were opening, abort.
-                if (generation.get() != expectedGeneration)
-                {
-                    try
-                    {
-                        clip.stop();
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
-                    try
-                    {
-                        clip.close();
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
-                    return;
-                }
-
-                currentClip = clip;
-                clip.start();
+                audioPlayer.play(new ByteArrayInputStream(wavBytes), SPEECH_GAIN_DB);
             }
             catch (Exception e)
             {
-                log.debug("Audio playback failed: {}", e.toString());
-                stopCurrentClipLocked();
+                log.debug("RuneLite AudioPlayer playback failed: {}", e.toString());
             }
         }
     }
 
-    private void stopCurrentClip()
+    private void hardCutBestEffort()
     {
-        synchronized (clipLock)
-        {
-            stopCurrentClipLocked();
-        }
-    }
-
-    private void stopCurrentClipLocked()
-    {
-        if (currentClip != null)
+        synchronized (playLock)
         {
             try
             {
-                currentClip.stop();
+                audioPlayer.play(new ByteArrayInputStream(SILENT_WAV), SILENT_GAIN_DB);
             }
             catch (Exception ignored)
             {
             }
-
-            try
-            {
-                currentClip.close();
-            }
-            catch (Exception ignored)
-            {
-            }
-
-            currentClip = null;
         }
     }
 }
